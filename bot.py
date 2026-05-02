@@ -11,7 +11,9 @@ from typing import Optional, Dict, List, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
 import anthropic
-from flask import Flask, request, jsonify
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 import logging
 
 # ============================================================================
@@ -21,7 +23,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+app = FastAPI(title="Vera Bot API", version="1.0.0")
 
 # Deployment configuration via environment variables.
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -34,6 +36,27 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY els
 # ============================================================================
 # DATA MODELS
 # ============================================================================
+
+
+class ContextBody(BaseModel):
+    scope: str
+    context_id: str
+    version: int = 0
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TickBody(BaseModel):
+    now: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    available_triggers: List[str] = Field(default_factory=list)
+
+
+class ReplyBody(BaseModel):
+    conversation_id: str
+    merchant_id: str
+    customer_id: Optional[str] = None
+    from_role: str
+    message: str
+    turn_number: int = 0
 
 class CTAType(Enum):
     BINARY_YES_NO = "binary_yes_no"
@@ -98,7 +121,18 @@ class ContextStore:
 
     def store_context(self, scope: str, context_id: str, version: int, payload: Dict) -> tuple[bool, str]:
         """Store context with versioning. Returns (success, message/ack_id)"""
-        store = getattr(self, f"{scope}s", None)
+        # Map scope to the correct attribute name
+        scope_map = {
+            "category": "categories",
+            "merchant": "merchants",
+            "customer": "customers",
+            "trigger": "triggers"
+        }
+        store_name = scope_map.get(scope)
+        if not store_name:
+            return False, f"invalid_scope: {scope}"
+        
+        store = getattr(self, store_name, None)
         if store is None:
             return False, f"invalid_scope: {scope}"
         
@@ -439,20 +473,38 @@ Return ONLY the JSON response, no other text.
             return f"Samajh gaya {merchant_name}. Anytime you need help, just message. We're here! 💪"
 
 # ============================================================================
-# FLASK ROUTES
+# API ROUTES
 # ============================================================================
 
-@app.route("/v1/healthz", methods=["GET"])
+@app.get("/")
+def root():
+    """Root endpoint - API documentation"""
+    return {
+        "name": "Vera Bot API",
+        "version": "1.0.0",
+        "description": "Merchant engagement bot for magicpin AI Challenge",
+        "endpoints": {
+            "GET /v1/healthz": "Health check",
+            "GET /v1/metadata": "Bot metadata and team info",
+            "POST /v1/context": "Store context (category, merchant, customer, trigger)",
+            "POST /v1/tick": "Initiate proactive messages",
+            "POST /v1/reply": "Handle merchant/customer replies"
+        },
+        "documentation": "http://localhost:8080/docs",
+        "redoc": "http://localhost:8080/redoc"
+    }
+
+
+@app.get("/v1/healthz")
 def healthz():
     """Liveness probe endpoint"""
-    health_status = store.get_health_status()
-    return jsonify(health_status), 200
+    return store.get_health_status()
 
 
-@app.route("/v1/metadata", methods=["GET"])
+@app.get("/v1/metadata")
 def metadata():
     """Bot identity and submission info"""
-    return jsonify({
+    return {
         "team_name": "Vera AI Challenge Submission",
         "team_members": ["Vera AI"],
         "model": MODEL,
@@ -460,60 +512,57 @@ def metadata():
         "contact_email": "vera@magicpin.ai",
         "version": "1.0.0",
         "submitted_at": datetime.utcnow().isoformat() + "Z"
-    }), 200
+    }
 
 
-@app.route("/v1/context", methods=["POST"])
-def receive_context():
+@app.post("/v1/context")
+def receive_context(body: ContextBody):
     """Receive context push from judge"""
-    data = request.get_json()
-    
-    scope = data.get("scope")
-    context_id = data.get("context_id")
-    version = data.get("version", 0)
-    payload = data.get("payload", {})
+    scope = body.scope
+    context_id = body.context_id
+    version = body.version
+    payload = body.payload
     
     # Validate
     if scope not in ["category", "merchant", "customer", "trigger"]:
-        return jsonify({
+        return JSONResponse(status_code=400, content={
             "accepted": False,
             "reason": "invalid_scope",
             "details": f"scope must be one of [category, merchant, customer, trigger], got: {scope}"
-        }), 400
+        })
     
     # Store
     success, message = store.store_context(scope, context_id, version, payload)
     
     if not success:
         if "stale_version" in message:
-            return jsonify({
+            return JSONResponse(status_code=409, content={
                 "accepted": False,
                 "reason": "stale_version",
                 "current_version": store.merchants.get(context_id, {}).get("_version", -1)
-            }), 409
+            })
         else:
-            return jsonify({
+            return JSONResponse(status_code=400, content={
                 "accepted": False,
                 "reason": message,
                 "details": message
-            }), 400
+            })
     
-    return jsonify({
+    return {
         "accepted": True,
         "ack_id": message,
         "stored_at": datetime.utcnow().isoformat() + "Z"
-    }), 200
+    }
 
 
-@app.route("/v1/tick", methods=["POST"])
-def tick():
+@app.post("/v1/tick")
+def tick(body: TickBody):
     """
     Periodic wake-up. Bot decides whether to initiate messages.
     Returns list of actions to send.
     """
-    data = request.get_json()
-    now = data.get("now", datetime.utcnow().isoformat())
-    available_triggers = data.get("available_triggers", [])
+    now = body.now
+    available_triggers = body.available_triggers
     
     actions = []
     
@@ -590,33 +639,31 @@ def tick():
         actions.append(action)
     
     # Return actions
-    return jsonify({
+    return {
         "actions": [asdict(a) for a in actions]
-    }), 200
+    }
 
 
-@app.route("/v1/reply", methods=["POST"])
-def reply():
+@app.post("/v1/reply")
+def reply(body: ReplyBody):
     """
     Handle incoming reply from merchant/customer.
     Must respond within 30 seconds.
     """
-    data = request.get_json()
-    
-    conversation_id = data.get("conversation_id")
-    merchant_id = data.get("merchant_id")
-    customer_id = data.get("customer_id")
-    from_role = data.get("from_role")  # "merchant" or "customer"
-    message_text = data.get("message")
-    turn_number = data.get("turn_number", 0)
+    conversation_id = body.conversation_id
+    merchant_id = body.merchant_id
+    customer_id = body.customer_id
+    from_role = body.from_role  # "merchant" or "customer"
+    message_text = body.message
+    turn_number = body.turn_number
     
     # Get conversation context
     conversation = store.get_conversation(conversation_id)
     if not conversation:
-        return jsonify({
+        return JSONResponse(status_code=200, content={
             "action": "end",
             "rationale": "Conversation not found"
-        }), 200
+        })
     
     # Add incoming message to history
     store.add_turn(conversation_id, from_role, message_text)
@@ -624,12 +671,12 @@ def reply():
     # Get contexts for reply composition
     merchant_context = store.get_merchant_context(merchant_id)
     if not merchant_context:
-        return jsonify({"action": "end", "rationale": "Merchant not found"}), 200
+        return JSONResponse(status_code=200, content={"action": "end", "rationale": "Merchant not found"})
     
     category_slug = merchant_context.get("category_slug")
     category_context = store.get_category_context(category_slug)
     if not category_context:
-        return jsonify({"action": "end", "rationale": "Category not found"}), 200
+        return JSONResponse(status_code=200, content={"action": "end", "rationale": "Category not found"})
     
     # Compose reply
     try:
@@ -641,11 +688,11 @@ def reply():
         )
     except Exception as e:
         logger.error(f"Failed to compose reply: {e}")
-        return jsonify({
+        return JSONResponse(status_code=200, content={
             "action": "wait",
             "wait_seconds": 300,
             "rationale": f"Error composing reply: {e}"
-        }), 200
+        })
     
     # Build response
     response = {
@@ -660,7 +707,7 @@ def reply():
     elif reply_action.action == "wait":
         response["wait_seconds"] = reply_action.wait_seconds or 300
     
-    return jsonify(response), 200
+    return response
 
 
 # ============================================================================
@@ -670,4 +717,5 @@ def reply():
 if __name__ == "__main__":
     logger.info("Starting Vera Bot API Server...")
     logger.info(f"Using model: {MODEL}")
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    import uvicorn
+    uvicorn.run("bot:app", host="0.0.0.0", port=PORT, reload=False)
