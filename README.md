@@ -58,12 +58,12 @@ set ANTHROPIC_API_KEY=sk-ant-...        # On Windows
 python bot.py
 ```
 
-The server starts on `http://localhost:5000` and is ready to accept context and messages from the judge harness.
+The server starts on `http://localhost:8080` by default and is ready to accept context and messages from the judge harness.
 
 ### Health Check
 
 ```bash
-curl http://localhost:5000/v1/healthz
+curl http://localhost:8080/v1/healthz
 ```
 
 Expected response:

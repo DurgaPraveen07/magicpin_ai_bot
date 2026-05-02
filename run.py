@@ -27,7 +27,7 @@ def check_api_key():
 
 def check_dependencies():
     """Verify required packages installed"""
-    required = ["flask", "anthropic", "requests"]
+    required = ["fastapi", "uvicorn", "anthropic", "requests"]
     missing = []
     
     for pkg in required:
@@ -67,7 +67,16 @@ def main():
         os.environ["PORT"] = str(PORT)
         os.environ.setdefault("BOT_PORT", str(PORT))
         os.environ.setdefault("BOT_MODEL", MODEL)
-        subprocess.run([sys.executable, "bot.py"], cwd=os.path.dirname(__file__))
+        subprocess.run([
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "bot:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(PORT)
+        ], cwd=os.path.dirname(__file__), check=False)
     except KeyboardInterrupt:
         print("\n\nServer stopped.")
         sys.exit(0)
